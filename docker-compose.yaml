@@ -1,110 +1,148 @@
-# Copyright 2024 Blnk Finance Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+﻿# Hunapay Ledger Core  Docker Compose
+# Forked from blnkfinance/blnk  extended for Hunapay infrastructure
+# master_doc.md compliance: PostgreSQL (ACID), Redis (idempotency/cache), observability
+
 version: "3.8"
 
 services:
-  server:
-    image: ${BLNK_IMAGE:-jerryenebeli/blnk:0.13.3}
-    container_name: server
+
+  #  LEDGER SERVER 
+  # Core ledger: double-entry engine, transaction recording, balance management
+  # master_doc.md: Ledger = records money. Services = decide business logic.
+  hunapay-server:
+    image: ${BLNK_IMAGE:-jerryenebeli/blnk:0.13.5}
+    container_name: hunapay-server
     restart: on-failure
     entrypoint: ["/bin/sh", "-c"]
     command:
       - "blnk migrate up && blnk start"
     environment:
-      TZ: ${TZ:-Etc/UTC}
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      TZ: ${TZ:-Africa/Lagos}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://hunapay-jaeger:4318}
     ports:
-      - "5001:5001"
-      - "80:80"
-      - "443:443"
+      - "${BLNK_SERVER_PORT:-5001}:5001"
     depends_on:
-      - redis
-      - postgres
-      - jaeger
+      hunapay-postgres:
+        condition: service_healthy
+      hunapay-redis:
+        condition: service_healthy
+      hunapay-jaeger:
+        condition: service_healthy
     volumes:
-      - ./blnk.json:/blnk.json
+      - ./hunapay.json:/blnk.json
+    networks:
+      - hunapay-net
 
-  worker:
-    image: ${BLNK_IMAGE:-jerryenebeli/blnk:0.13.3}
-    container_name: worker
+  #  BACKGROUND WORKER 
+  # Processes async transactions from queue (Asynq/Redis-backed)
+  hunapay-worker:
+    image: ${BLNK_IMAGE:-jerryenebeli/blnk:0.13.5}
+    container_name: hunapay-worker
     restart: on-failure
     entrypoint: ["blnk", "workers"]
     environment:
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
-    ports:
-      - "5004:5004"
+      TZ: ${TZ:-Africa/Lagos}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://hunapay-jaeger:4318}
     depends_on:
-      - redis
-      - postgres
-      - jaeger
+      hunapay-postgres:
+        condition: service_healthy
+      hunapay-redis:
+        condition: service_healthy
     volumes:
-      - ./blnk.json:/blnk.json
+      - ./hunapay.json:/blnk.json
+    networks:
+      - hunapay-net
 
-  redis:
-    image: redis:7.2.4
-    container_name: redis
-    restart: on-failure
-
-  postgres:
-    image: ${POSTGRES_IMAGE:-postgres:16}
-    container_name: ${POSTGRES_CONTAINER:-postgres}
+  #  POSTGRESQL 
+  # Primary database  ACID compliant, strong consistency
+  # master_doc.md: PostgreSQL, ACID compliance, strong consistency, proper indexing
+  hunapay-postgres:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    container_name: ${POSTGRES_CONTAINER:-hunapay-postgres}
     restart: on-failure
     ports:
       - "${POSTGRES_OUTER_PORT:-5432}:5432"
     environment:
-      TZ: ${TZ:-Etc/UTC}
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
-      POSTGRES_DB: ${POSTGRES_DB:-blnk}
+      TZ: ${TZ:-Africa/Lagos}
+      POSTGRES_USER: ${POSTGRES_USER:-hunapay}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hunapay_secure_CHANGE_IN_PROD}
+      POSTGRES_DB: ${POSTGRES_DB:-hunapay_ledger}
     volumes:
-      - pg_data:/var/lib/postgresql/data
+      - hunapay_pg_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER:-postgres}"]
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER:-hunapay}", "-d", "${POSTGRES_DB:-hunapay_ledger}"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
+    networks:
+      - hunapay-net
 
-  typesense:
-    image: typesense/typesense:29.0
-    container_name: typesense
-    command:
-      ["--data-dir", "/data", "--api-key=blnk-api-key", "--listen-port", "8108"]
+  #  REDIS 
+  # master_doc.md: balance caching, rate limiting, idempotency keys
+  hunapay-redis:
+    image: redis:7.2.4-alpine
+    container_name: ${REDIS_CONTAINER:-hunapay-redis}
+    restart: on-failure
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
     volumes:
-      - typesense_data:/data
-    logging:
-      driver: "none"
+      - hunapay_redis_data:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8108/health"]
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - hunapay-net
+
+  #  TYPESENSE 
+  # Full-text search for ledger records
+  hunapay-typesense:
+    image: typesense/typesense:29.0
+    container_name: ${TYPESENSE_CONTAINER:-hunapay-typesense}
+    restart: on-failure
+    command: ["--data-dir", "/data", "--api-key=${TYPESENSE_API_KEY:-hunapay-ts-key}", "--listen-port", "8108"]
+    ports:
+      - "${TYPESENSE_PORT:-8108}:8108"
+    volumes:
+      - hunapay_typesense_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8108/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
+      start_period: 15s
+    networks:
+      - hunapay-net
 
-  jaeger:
+  #  JAEGER 
+  # Distributed tracing  master_doc.md: structured logs, metrics, alerting
+  hunapay-jaeger:
     image: jaegertracing/all-in-one:latest
-    container_name: jaeger
+    container_name: ${JAEGER_CONTAINER:-hunapay-jaeger}
+    restart: on-failure
     ports:
-      - "16686:16686" # Jaeger UI
-      - "4317:4317" # OTLP gRPC
-      - "4318:4318" # OTLP HTTP
+      - "${JAEGER_UI_PORT:-16686}:16686"
+      - "4317:4317"
+      - "4318:4318"
     environment:
-      - COLLECTOR_OTLP_ENABLED=true
+      COLLECTOR_OTLP_ENABLED: "true"
     healthcheck:
-      test: ["CMD", "wget", "--spider", "http://localhost:16686"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:16686 || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 3
+      retries: 5
+      start_period: 10s
+    networks:
+      - hunapay-net
 
 volumes:
-  pg_data:
-  typesense_data:
+  hunapay_pg_data:
+  hunapay_redis_data:
+  hunapay_typesense_data:
+
+networks:
+  hunapay-net:
+    driver: bridge

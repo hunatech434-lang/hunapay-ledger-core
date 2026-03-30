@@ -1,0 +1,38 @@
+{
+  "project_name": "HunapayLedgerCore",
+  "data_source": {
+    "dns": "postgres://hunapay:hunapay_secure_pass_CHANGE_IN_PROD@hunapay-postgres:5432/hunapay_ledger?sslmode=disable"
+  },
+  "redis": {
+    "dns": "hunapay-redis:6379"
+  },
+  "server": {
+    "port": "5001",
+    "ssl": false,
+    "ssl_domain": "",
+    "ssl_email": ""
+  },
+  "transaction_batch": {
+    "batch_size": 100,
+    "workers_count": 5
+  },
+  "account_number_generation": {
+    "enable_auto_generation": false
+  },
+  "notification": {
+    "slack": {
+      "webhook_url": ""
+    },
+    "webhook": {
+      "url": "",
+      "headers": {}
+    }
+  },
+  "search": {
+    "dns": "http://hunapay-typesense:8108",
+    "api_key": "hunapay-typesense-key-CHANGE_IN_PROD"
+  },
+  "otel": {
+    "collector_url": "http://hunapay-jaeger:4318"
+  }
+}

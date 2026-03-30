@@ -9,3 +9,7 @@ dump.rdb
 heartbeat.db
 .claude
 CLAUDE.md
+# Hunapay secrets
+.env
+*.local
+
